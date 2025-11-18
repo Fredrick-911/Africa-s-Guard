@@ -1,73 +1,99 @@
-# Welcome to your Lovable project
+# AfriGuard Verify - Frontend Dashboard
 
-## Project info
+WhatsApp-first deepfake detection system with AI-powered analysis for images, videos, and audio.
 
-**URL**: https://lovable.dev/projects/ac5aeb2b-5a60-47b5-ba2a-d946eb88a212
+## 🚀 Quick Start
 
-## How can I edit this code?
+```bash
+# Install dependencies
+npm install
 
-There are several ways of editing your application.
+# Copy environment variables
+cp .env.example .env
 
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://lovable.dev/projects/ac5aeb2b-5a60-47b5-ba2a-d946eb88a212) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+# Start development server
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+## 📚 Documentation
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+- **[Developer Setup Guide](DEVELOPER_SETUP.md)** - Complete setup and integration instructions
+- **[API Documentation](API_DOCUMENTATION.md)** - Backend API specifications and endpoints
+- **[Lovable Project](https://lovable.dev/projects/ac5aeb2b-5a60-47b5-ba2a-d946eb88a212)** - Edit via Lovable platform
 
-**Use GitHub Codespaces**
+## 🛠️ Tech Stack
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+- React 18 + TypeScript
+- Vite (Build tool)
+- Tailwind CSS (Styling)
+- Shadcn/ui (UI components)
+- React Router v6 (Routing)
+- TanStack Query (Data fetching)
+- Recharts (Data visualization)
+- Axios (HTTP client)
 
-## What technologies are used for this project?
+## 📁 Project Structure
 
-This project is built with:
+```
+src/
+├── components/     # Reusable UI components
+├── pages/         # Page components (routes)
+├── services/      # API service layer (BACKEND INTEGRATION HERE)
+├── types/         # TypeScript type definitions
+├── hooks/         # Custom React hooks
+└── lib/           # Utility functions
+```
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## 🔧 Available Scripts
 
-## How can I deploy this project?
+```bash
+npm run dev        # Start development server
+npm run build      # Build for production
+npm run preview    # Preview production build
+npm run lint       # Run ESLint
+```
 
-Simply open [Lovable](https://lovable.dev/projects/ac5aeb2b-5a60-47b5-ba2a-d946eb88a212) and click on Share -> Publish.
+## 🌐 Environment Variables
 
-## Can I connect a custom domain to my Lovable project?
+See `.env.example` for required environment variables.
 
-Yes, you can!
+## 📖 Features
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+- 🔐 Authentication with JWT
+- 📊 Real-time analytics dashboard
+- 📝 Case management with filtering
+- 🔄 Live queue monitoring (WebSocket)
+- 💬 User feedback system
+- ⚙️ Customizable settings
+- 📱 Fully responsive design
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## 🔌 Backend Integration
+
+The frontend is ready for backend integration. All API calls are centralized in `src/services/`:
+
+- `AuthService.ts` - Authentication
+- `CaseService.ts` - Case management
+- `FeedbackService.ts` - User feedback
+- `QueueService.ts` - Real-time queue
+
+See **[API_DOCUMENTATION.md](API_DOCUMENTATION.md)** for endpoint specifications.
+
+## 🚢 Deployment
+
+### Option 1: Deploy via Lovable
+Simply open [Lovable](https://lovable.dev/projects/ac5aeb2b-5a60-47b5-ba2a-d946eb88a212) and click Share → Publish.
+
+### Option 2: Manual Deployment
+```bash
+npm run build
+# Deploy the dist/ folder to your hosting service
+```
+
+### Option 3: GitHub Integration
+1. Connect to GitHub via Lovable
+2. Enable automatic deployments on your hosting platform
+3. Changes sync automatically
+
+## 📝 License
+
+This project was created with [Lovable](https://lovable.dev).

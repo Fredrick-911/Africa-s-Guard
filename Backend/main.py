@@ -1,6 +1,8 @@
+# backend/main.py
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List
-from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector, ViTForImageClassification, ViTImageProcessor
+from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector, ViTImageProcessor, ViTForImageClassification
 import torch
 import numpy as np
 import librosa
@@ -9,146 +11,156 @@ from PIL import Image
 import cv2
 import tempfile
 import os
+import shutil
 
-app = FastAPI(title="Afriguard Manipulation Detection API")
+app = FastAPI(
+    title="Afriguard - Deepfake & Manipulation Detection API",
+    description="Detect deepfakes in images, audio (speaker verification), and videos",
+    version="2.0"
+)
 
-# Load models
-feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
-model = WavLMForXVector.from_pretrained('microsoft/wavlm-base-plus-sv')
+# CORS - CRITICAL for React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080", "https://yourdomain.com"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# Load models ONCE at startup (much faster)
+@app.on_event("startup")
+async def load_models():
+    global feature_extractor, speaker_model, image_processor, image_model
+    
+    print("Loading WavLM speaker verification model...")
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained('microsoft/wavlm-base-plus-sv')
+    speaker_model = WavLMForXVector.from_pretrained('microsoft/wavlm-base-plus-sv')
+    
+    print("Loading Deepfake Image Detector (ViT)...")
+    image_processor = ViTImageProcessor.from_pretrained("prithivMLmods/Deep-Fake-Detector-v2-Model")
+    image_model = ViTForImageClassification.from_pretrained("prithivMLmods/Deep-Fake-Detector-v2-Model")
+    
+    print("All models loaded successfully!")
 
-image_processor = ViTImageProcessor.from_pretrained("prithivMLmods/Deep-Fake-Detector-v2-Model")
-image_model = ViTForImageClassification.from_pretrained("prithivMLmods/Deep-Fake-Detector-v2-Model")
-
+#  endpoints 
 @app.post("/detect/image/")
 async def detect_image_manipulation(image: UploadFile = File(...)):
-    """Detect image deepfake/fake manipulation."""
+    if not image.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.webp')):
+        raise HTTPException(400, "Invalid image format")
+        
     try:
-        img_bytes = await image.read()
-        pil_image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        # Preprocess
+        contents = await image.read()
+        pil_image = Image.open(io.BytesIO(contents)).convert("RGB")
         inputs = image_processor(images=pil_image, return_tensors="pt")
+        
         with torch.no_grad():
-            outputs = image_model(**inputs)
-            logits = outputs.logits
+            logits = image_model(**inputs).logits
             probs = torch.softmax(logits, dim=1)
-            predicted_class = torch.argmax(logits, dim=1).item()
-            confidence = float(torch.max(probs).item())
-        label = image_model.config.id2label[predicted_class]
-
-        is_fake = label.lower() in ["fake", "deepfake"]
-
+            predicted_idx = torch.argmax(logits, dim=1).item()
+            confidence = probs[0][predicted_idx].item()
+            label = image_model.config.id2label[predicted_idx]
+        
+        is_fake = label.lower() in ["fake", "deepfake", "manipulated"]
+        
         return {
+            "filename": image.filename,
             "predicted_label": label,
-            "fake": is_fake,
-            "confidence": confidence,
+            "is_fake": is_fake,
+            "confidence": round(confidence, 4)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Image processing failed: {str(e)}")
+        raise HTTPException(500, f"Image analysis failed: {str(e)}")
 
 @app.post("/detect/audio/")
 async def detect_audio_manipulation(audio_files: List[UploadFile] = File(...)):
-    """
-    Detect if two audio files are from the same speaker using wavlm-base-plus-sv.
-    Expects two uploaded wav files. Make sure the files have different names.
-    Returns similarity and boolean is_same_speaker decision.
-    """
     if len(audio_files) != 2:
-        raise HTTPException(status_code=400, detail="Exactly 2 audio files must be uploaded (for speaker comparison).")
+        raise HTTPException(400, "Exactly 2 audio files required")
+    
     try:
-        audio_arrays = []
-        for f in audio_files:
-            data = await f.read()
-            waveform, sr = librosa.load(io.BytesIO(data), sr=16000)
-            audio_arrays.append(waveform)
-        
-        inputs = feature_extractor(audio_arrays, sampling_rate=16000, padding=True, return_tensors="pt")
+        arrays = []
+        for audio in audio_files:
+            if not audio.filename.lower().endswith(('.wav', '.mp3', '.m4a')):
+                raise HTTPException(400, f"Unsupported audio: {audio.filename}")
+            content = await audio.read()
+            waveform, sr = librosa.load(io.BytesIO(content), sr=16000)
+            arrays.append(waveform)
+
+        inputs = feature_extractor(arrays, sampling_rate=16000, padding=True, return_tensors="pt")
         with torch.no_grad():
-            embeddings = model(**inputs).embeddings
-        embeddings = torch.nn.functional.normalize(embeddings, dim=-1).cpu()
-        cosine_sim = torch.nn.CosineSimilarity(dim=-1)
-        similarity = float(cosine_sim(embeddings[0], embeddings[1]))
-        threshold = 0.86  # The optimal threshold is dataset-dependent
+            embeddings = speaker_model(**inputs).embeddings
+            embeddings = torch.nn.functional.normalize(embeddings, dim=-1).cpu()
+        
+        similarity = float(torch.nn.CosineSimilarity(dim=-1)(embeddings[0], embeddings[1]))
+        threshold = 0.86
+        is_same = similarity >= threshold
+
         return {
-            "similarity": similarity,
-            "is_same_speaker": similarity >= threshold,
-            "threshold": threshold
+            "similarity_score": round(similarity, 4),
+            "is_same_speaker": is_same,
+            "threshold": threshold,
+            "interpretation": "High similarity → likely same speaker (possible deepfake voice cloning)"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
+        raise HTTPException(500, f"Audio analysis failed: {str(e)}")
 
 @app.post("/detect/video/")
 async def detect_video_manipulation(video: UploadFile = File(...)):
-    """Detect video deepfake/fake manipulation."""
-    try:
-        # Save uploaded video temporarily
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".mp4")
-        with os.fdopen(temp_fd, "wb") as f:
-            f.write(await video.read())
+    if not video.filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
+        raise HTTPException(400, "Invalid video format")
 
-        # Extract N frames from the video
-        N = 5
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    try:
+        shutil.copyfileobj(video.file, temp_file)
+        temp_file.close()
+
+        cap = cv2.VideoCapture(temp_file.name)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total / fps if fps > 0 else 0
+
+        # Sample 8 frames evenly
+        frame_indices = np.linspace(0, max(total-1, 0), 8, dtype=int)
         frames = []
-        cap = cv2.VideoCapture(temp_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames < N:
-            idxs = np.arange(total_frames)
-        else:
-            idxs = np.linspace(0, total_frames - 1, N).astype(int)
-        for idx in idxs:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        for i in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
             if ret:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame_rgb)
-                frames.append(pil_image)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(Image.fromarray(frame))
         cap.release()
-        os.remove(temp_path)
 
-        # Run frame-level deepfake/image manipulation (classification)
-        frame_results = []
-        fake_probs = []
-        label_counts = {}
-        for pil_image in frames:
-            inputs = image_processor(images=pil_image, return_tensors="pt")
+        results = []
+        fake_confidences = []
+        for frame in frames:
+            inputs = image_processor(images=frame, return_tensors="pt")
             with torch.no_grad():
-                outputs = image_model(**inputs)
-                logits = outputs.logits
-                probs = torch.softmax(logits, dim=1)
-                predicted_class = torch.argmax(logits, dim=1).item()
-                confidence = float(torch.max(probs).item())
-                label = image_model.config.id2label[predicted_class]
-                # Collect frame-wise results
-                frame_results.append({
-                    "predicted_label": label,
-                    "confidence": confidence
-                })
-                fake_probs.append(probs[0, predicted_class].item())
-                label_counts[label] = label_counts.get(label, 0) + 1
+                logits = image_model(**inputs).logits
+                prob = torch.softmax(logits, dim=1)[0]
+                pred_idx = torch.argmax(logits, dim=1).item()
+                conf = prob[pred_idx].item()
+                label = image_model.config.id2label[pred_idx]
+                results.append({"label": label, "confidence": conf})
+                if label.lower() in ["fake", "deepfake"]:
+                    fake_confidences.append(conf)
 
-        # Determine overall prediction for video
-        if label_counts:
-            # Most common label
-            most_common_label = max(label_counts, key=label_counts.get)
-            confidence = float(np.mean(fake_probs)) if fake_probs else 0.0
-        else:
-            most_common_label = "unknown"
-            confidence = 0.0
-
-        # Is the video considered fake?
-        # You might want to customize what label means fake for your model
-        is_fake = most_common_label.lower() in ["fake", "deepfake"]
+        avg_fake_conf = np.mean(fake_confidences) if fake_confidences else 0
+        is_fake = avg_fake_conf > 0.6  # adjustable threshold
 
         return {
-            "predicted_label": most_common_label,
-            "fake": is_fake,
-            "confidence": confidence,
-            "frame_results": frame_results,
-            "details": "Detection run on sample video frames.",
+            "filename": video.filename,
+            "duration_sec": round(duration, 2),
+            "frames_analyzed": len(frames),
+            "is_fake": is_fake,
+            "fake_confidence_avg": round(avg_fake_conf, 4),
+            "verdict": "DEEPFAKE DETECTED" if is_fake else "Likely Authentic",
+            "frame_details": results
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Video processing failed: {str(e)}")
+        raise HTTPException(500, f"Video processing failed: {str(e)}")
+    finally:
+        os.unlink(temp_file.name)
 
 @app.get("/")
-def read_root():
-    return {"msg": "Afriguard Manipulation Detection API. Use /docs for Swagger UI."}
+def home():
+    return {"message": "Afriguard API running!", "docs": "/docs"}

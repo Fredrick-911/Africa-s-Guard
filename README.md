@@ -80,20 +80,20 @@ See **[API_DOCUMENTATION.md](API_DOCUMENTATION.md)** for endpoint specifications
 
 ## 🚢 Deployment
 
-### Option 1: Deploy via Lovable
-Simply open [Lovable](https://lovable.dev/projects/ac5aeb2b-5a60-47b5-ba2a-d946eb88a212) and click Share → Publish.
 
-### Option 2: Manual Deployment
+### Option 1: Manual Deployment
+
 ```bash
 npm run build
 # Deploy the dist/ folder to your hosting service
 ```
 
-### Option 3: GitHub Integration
+### Option 2: GitHub Integration
+
 1. Connect to GitHub via Lovable
 2. Enable automatic deployments on your hosting platform
 3. Changes sync automatically
 
 ## 📝 License
 
-This project was created with [Lovable](https://lovable.dev).
+This project was created with Fredrick

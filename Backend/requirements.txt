@@ -1,13 +1,19 @@
-fastapi[standard]==0.110.0
+# AfriGuard-Verify backend — install on Python 3.11 (NOT 3.14)
+# Create the venv with:  py -3.11 -m venv venv
+
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
 
 transformers==4.36.2
 torch==2.1.2
+numpy==1.23.5          # MUST stay <2.0 — numpy 2.x breaks torch 2.1.2
 
-numpy==1.23.5
 librosa==0.10.1
 soundfile==0.12.1
-
 pillow==10.2.0
 opencv-python==4.9.0.80
 
-typing-extensions==4.8.0
+# Meta WhatsApp Cloud API integration (Twilio removed)
+requests==2.31.0
+python-dotenv==1.0.1

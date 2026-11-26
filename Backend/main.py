@@ -72,41 +72,54 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-# Flag as manipulated ONLY when the model is at least this confident.
-# Deliberately conservative: a false accusation can harm as much as a deepfake.
-FAKE_THRESHOLD = 0.80
+# Verdict bands. We only give a confident yes/no when the model is confident;
+# the uncertain middle is routed to human review instead of being forced into
+# a misleading label. A false accusation can harm as much as a deepfake.
+FAKE_THRESHOLD = 0.80        # >= this -> Manipulated
+AUTHENTIC_THRESHOLD = 0.20   # <= this -> Authentic ; between the two -> Inconclusive
 
 
-def _record_case(media_type: str, fake_probability: float, explanation: str = "") -> dict:
+def _record_case(
+    media_type: str,
+    fake_probability: float,
+    caption: str = "",
+    frame_details: list = None,
+) -> dict:
     fake_prob = fake_probability or 0.0
-    is_fake = fake_prob >= FAKE_THRESHOLD
 
-    # Show the percentage that AGREES with the verdict, so the number never
-    # contradicts the label:
-    #   manipulated -> show the deepfake probability
-    #   authentic   -> show the authentic probability (100 - deepfake%)
-    if is_fake:
-        display_pct = round(fake_prob * 100)
+    if fake_prob >= FAKE_THRESHOLD:
+        band = "manipulated"
+        is_fake = True
+        needs_review = False
+        display_pct = round(fake_prob * 100)              # deepfake %
         verdict = f"{display_pct}% Likely Manipulated"
-    else:
-        display_pct = round((1 - fake_prob) * 100)
+    elif fake_prob <= AUTHENTIC_THRESHOLD:
+        band = "authentic"
+        is_fake = False
+        needs_review = False
+        display_pct = round((1 - fake_prob) * 100)        # authentic % (always >= 80 here)
         verdict = f"{display_pct}% Likely Authentic"
+    else:
+        band = "inconclusive"
+        is_fake = False
+        needs_review = True
+        display_pct = round(fake_prob * 100)              # show raw deepfake % for reviewers
+        verdict = f"Inconclusive ({display_pct}% deepfake probability) - needs review"
 
     case = {
         "id": "case-" + uuid.uuid4().hex[:8],
         "mediaType": media_type,                 # 'image' | 'video' | 'audio'
         "status": "completed",
+        "band": band,                            # 'manipulated' | 'authentic' | 'inconclusive'
         "confidence": display_pct,               # 0-100, matches the verdict label
-        "fakeProbability": round(fake_prob * 100),  # raw deepfake % (for the dashboard/analysts)
+        "fakeProbability": round(fake_prob * 100),  # raw deepfake % (for analysts)
+        "needsReview": needs_review,
+        "caption": caption,                      # what the media shows (model-generated, may be "")
         "submittedAt": _now_iso(),
         "completedAt": _now_iso(),
         "verdict": verdict,
         "isFake": bool(is_fake),
-        "explanation": explanation or (
-            f"Model assessed this {media_type} at {round(fake_prob * 100)}% deepfake "
-            f"probability (threshold {int(FAKE_THRESHOLD * 100)}%). "
-            f"Verdict: {'manipulated' if is_fake else 'likely authentic'}."
-        ),
+        "explanation": _build_reason(media_type, band, fake_prob, frame_details),
     }
     with _cases_lock:
         CASES.insert(0, case)
@@ -127,6 +140,84 @@ def _record_failed(media_type: str) -> dict:
     with _cases_lock:
         CASES.insert(0, case)
     return case
+
+
+# ------------------------------------------------------------------
+# IMAGE CAPTIONING (lazy-loaded)
+# Not loaded at startup: it's an extra ~1GB model, so we only pay for it
+# on the first request that actually needs a media description.
+# ------------------------------------------------------------------
+caption_processor = None
+caption_model = None
+_caption_lock = threading.Lock()
+
+
+def get_caption_model():
+    global caption_processor, caption_model
+    if caption_model is None:
+        with _caption_lock:
+            if caption_model is None:  # double-checked locking
+                from transformers import BlipProcessor, BlipForConditionalGeneration
+                print("Loading image captioning model (BLIP)... this is a one-time ~1GB download.")
+                caption_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+                caption_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+                caption_model.eval()
+                print("Captioning model loaded.")
+    return caption_processor, caption_model
+
+
+def generate_caption(pil_image: Image.Image) -> str:
+    """Real, model-generated description of what's in the media.
+    Never fabricated -- if generation fails, we return an empty string
+    rather than inventing a description."""
+    try:
+        processor, model = get_caption_model()
+        inputs = processor(images=pil_image, return_tensors="pt")
+        with torch.no_grad():
+            output_ids = model.generate(**inputs, max_new_tokens=30)
+        caption = processor.decode(output_ids[0], skip_special_tokens=True)
+        return caption.strip().capitalize()
+    except Exception as e:
+        print("Captioning failed:", e)
+        return ""
+
+
+def _build_reason(media_type: str, band: str, fake_prob: float, frame_details: list = None) -> str:
+    """Grounded explanation for the verdict, built ONLY from real numbers the
+    model produced. This deliberately does NOT claim to have found specific
+    artifacts (e.g. 'asymmetric eyes') in this particular file -- the model
+    has no such interpretability, and inventing per-image evidence would be
+    fabrication, not analysis. The methodology sentence below describes what
+    this class of model looks for in general, not what it "saw" here."""
+    pct = round(fake_prob * 100)
+
+    frame_note = ""
+    if media_type == "video" and frame_details:
+        flagged = sum(
+            1 for f in frame_details
+            if str(f.get("label", "")).lower() in ("fake", "deepfake", "manipulated")
+        )
+        frame_note = f" {flagged} of {len(frame_details)} sampled frames scored above the manipulation threshold."
+
+    if band == "manipulated":
+        return (
+            f"Flagged as manipulated: deepfake probability was {pct}%, above the "
+            f"{int(FAKE_THRESHOLD * 100)}% threshold we require before using this label."
+            f"{frame_note} This score comes from a Vision Transformer trained to recognize "
+            f"patterns commonly seen in GAN-generated and face-swapped media, such as blending "
+            f"artifacts, texture inconsistencies, and irregular lighting."
+        )
+    if band == "authentic":
+        return (
+            f"Flagged as authentic: deepfake probability was only {pct}%, well below the "
+            f"{int(AUTHENTIC_THRESHOLD * 100)}% threshold required to raise concern."
+            f"{frame_note} No strong indicators of GAN generation or face-swapping were detected."
+        )
+    return (
+        f"Result inconclusive: deepfake probability was {pct}%, in the uncertain range between "
+        f"{int(AUTHENTIC_THRESHOLD * 100)}% and {int(FAKE_THRESHOLD * 100)}%.{frame_note} "
+        f"Rather than force a guess, this case is queued for a human reviewer."
+    )
 
 
 # ------------------------------------------------------------------
@@ -213,6 +304,12 @@ def analyze_video_path(path: str) -> dict:
     avg_fake_prob = float(np.mean(fake_probs)) if fake_probs else 0.0
     is_fake = avg_fake_prob > 0.5
 
+    # Caption a single representative (middle) frame -- captioning all 8
+    # would multiply an already-slow CPU operation by 8x for little benefit.
+    caption = ""
+    if frames:
+        caption = generate_caption(frames[len(frames) // 2])
+
     return {
         "duration_sec": round(duration, 2),
         "frames_analyzed": len(frames),
@@ -221,6 +318,7 @@ def analyze_video_path(path: str) -> dict:
         "fake_confidence_avg": round(avg_fake_prob, 4),   # kept for backward compat
         "verdict": "DEEPFAKE DETECTED" if is_fake else "Likely Authentic",
         "frame_details": results,
+        "caption": caption,
     }
 
 
@@ -235,8 +333,15 @@ async def detect_image_manipulation(image: UploadFile = File(...)):
         contents = await image.read()
         pil_image = Image.open(io.BytesIO(contents)).convert("RGB")
         result = analyze_image_pil(pil_image)
-        case = _record_case("image", result["fake_probability"])
-        return {"filename": image.filename, "case_id": case["id"], **result}
+        caption = generate_caption(pil_image)
+        case = _record_case("image", result["fake_probability"], caption=caption)
+        return {
+            "filename": image.filename,
+            "case_id": case["id"],
+            "caption": caption,
+            "explanation": case["explanation"],
+            **result,
+        }
     except Exception as e:
         raise HTTPException(500, f"Image analysis failed: {str(e)}")
 
@@ -262,12 +367,28 @@ async def detect_audio_manipulation(audio_files: List[UploadFile] = File(...)):
         similarity = float(torch.nn.CosineSimilarity(dim=-1)(embeddings[0], embeddings[1]))
         threshold = 0.86
         is_same = similarity >= threshold
+        sim_pct = round(similarity * 100)
+
+        # Grounded in the real similarity score -- no fabricated audio
+        # "description", since speaker verification has no transcription
+        # or content-captioning capability.
+        if is_same:
+            explanation = (
+                f"These two clips scored {sim_pct}% voice-print similarity, above the "
+                f"{int(threshold * 100)}% threshold, suggesting they are likely the same speaker."
+            )
+        else:
+            explanation = (
+                f"These two clips scored {sim_pct}% voice-print similarity, below the "
+                f"{int(threshold * 100)}% threshold, suggesting they are likely different speakers."
+            )
 
         return {
             "similarity_score": round(similarity, 4),
             "is_same_speaker": is_same,
             "threshold": threshold,
             "interpretation": "High similarity -> likely same speaker (possible deepfake voice cloning)",
+            "explanation": explanation,
         }
     except Exception as e:
         raise HTTPException(500, f"Audio analysis failed: {str(e)}")
@@ -283,8 +404,18 @@ async def detect_video_manipulation(video: UploadFile = File(...)):
         shutil.copyfileobj(video.file, temp_file)
         temp_file.close()
         result = analyze_video_path(temp_file.name)
-        case = _record_case("video", result["fake_probability"])
-        return {"filename": video.filename, "case_id": case["id"], **result}
+        case = _record_case(
+            "video",
+            result["fake_probability"],
+            caption=result.get("caption", ""),
+            frame_details=result["frame_details"],
+        )
+        return {
+            "filename": video.filename,
+            "case_id": case["id"],
+            "explanation": case["explanation"],
+            **result,
+        }
     except Exception as e:
         raise HTTPException(500, f"Video processing failed: {str(e)}")
     finally:
@@ -361,6 +492,28 @@ def _send_whatsapp(to_number: str, body: str):
     )
 
 
+def _format_whatsapp_verdict(case: dict) -> str:
+    """One reply format that respects the three verdict bands, and includes
+    what the media shows plus why the verdict was reached."""
+    if case["band"] == "manipulated":
+        headline = "Deepfake detected"
+    elif case["band"] == "authentic":
+        headline = "Likely authentic"
+    else:
+        headline = "Result inconclusive - a human reviewer will take a closer look"
+
+    lines = [
+        f"Analysis complete! {headline}.",
+        f"Case ID: {case['id']}",
+        f"Details: {case['verdict']}",
+    ]
+    if case.get("caption"):
+        lines.append(f"What we saw: {case['caption']}")
+    if case.get("explanation"):
+        lines.append(f"Why: {case['explanation']}")
+    return "\n".join(lines)
+
+
 def process_whatsapp_media(from_number: str, media_url: str, content_type: str):
     """Runs in the background: download -> detect -> record case -> reply."""
     media_type = "image" if content_type.startswith("image/") else \
@@ -372,13 +525,9 @@ def process_whatsapp_media(from_number: str, media_url: str, content_type: str):
         if media_type == "image":
             pil = Image.open(io.BytesIO(data)).convert("RGB")
             r = analyze_image_pil(pil)
-            case = _record_case("image", r["fake_probability"])
-            verdict = "Deepfake detected" if case["isFake"] else "Likely authentic"
-            reply = (
-                f"Analysis complete! {verdict}.\n"
-                f"Case ID: {case['id']}\n"
-                f"Details: {case['verdict']}"
-            )
+            caption = generate_caption(pil)
+            case = _record_case("image", r["fake_probability"], caption=caption)
+            reply = _format_whatsapp_verdict(case)
 
         elif media_type == "video":
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -388,13 +537,13 @@ def process_whatsapp_media(from_number: str, media_url: str, content_type: str):
                 r = analyze_video_path(tmp.name)
             finally:
                 os.unlink(tmp.name)
-            case = _record_case("video", r["fake_probability"])
-            verdict = "Deepfake detected" if case["isFake"] else "Likely authentic"
-            reply = (
-                f"Analysis complete! {verdict}.\n"
-                f"Case ID: {case['id']}\n"
-                f"Details: {case['verdict']}"
+            case = _record_case(
+                "video",
+                r["fake_probability"],
+                caption=r.get("caption", ""),
+                frame_details=r["frame_details"],
             )
+            reply = _format_whatsapp_verdict(case)
 
         elif media_type == "audio":
             reply = (
